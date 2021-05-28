@@ -112,9 +112,13 @@ var (
 
 // istio labels, annotations, selector
 var (
+	IstioInjectLabelKey      = "istio.io/rev"
 	IstioInjectionAnnotation = "sidecar.istio.io/inject"
 	IstioAppLabelKey         = "app"
 	IstioVersionLabelKey     = "version"
+
+	injectedNamespace, _           = labels.NewRequirement(IstioInjectLabelKey, selection.Exists, nil)
+	IstioInjectedNamespaceSelector = labels.NewSelector().Add(*injectedNamespace)
 
 	existsApp, _            = labels.NewRequirement(IstioAppLabelKey, selection.Exists, nil)
 	existsVersion, _        = labels.NewRequirement(IstioVersionLabelKey, selection.Exists, nil)

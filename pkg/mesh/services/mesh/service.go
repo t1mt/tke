@@ -20,8 +20,10 @@
 package mesh
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	istionetworking "istio.io/client-go/pkg/apis/networking/v1alpha3"
@@ -36,6 +38,7 @@ import (
 	clusterclient "tkestack.io/tke/pkg/mesh/external/kubernetes"
 	"tkestack.io/tke/pkg/mesh/external/tcmesh"
 	"tkestack.io/tke/pkg/mesh/services"
+	"tkestack.io/tke/pkg/mesh/services/internal"
 	"tkestack.io/tke/pkg/mesh/services/rest"
 	"tkestack.io/tke/pkg/mesh/util/constants"
 	"tkestack.io/tke/pkg/mesh/util/errors"
@@ -43,6 +46,7 @@ import (
 )
 
 type meshClusterService struct {
+	common    *internal.CommonService
 	config    meshconfig.MeshConfiguration
 	tcmClient *tcmesh.Client
 	clients   clusterclient.Client
@@ -55,6 +59,7 @@ func New(
 ) services.MeshClusterService {
 
 	return &meshClusterService{
+		common:    internal.New(clients),
 		config:    config,
 		tcmClient: tcmClient,
 		clients:   clients,
@@ -114,12 +119,6 @@ func (m *meshClusterService) ListMicroServices(
 	)
 	wg.Add(size)
 
-	// TODO: check
-	//fieldSelector := constants.ExcludeNamespacesSelector
-	//if serviceName != "" {
-	//	fieldSelector = fields.AndSelectors(fieldSelector, fields.OneTermEqualSelector("metadata.name", serviceName))
-	//}
-
 	labelSelector := constants.IstioAppSelector
 	if selector != nil {
 		rs, _ := selector.Requirements()
@@ -148,10 +147,40 @@ func (m *meshClusterService) ListMicroServices(
 				return
 			}
 
+			// filter istio injected namespace
+			var fieldSelector fields.Selector = nil
+			if namespace == "" {
+				var e error
+				fieldSelector, e = m.injectedNamespaceSelector(ctx, clusterName)
+				if e != nil {
+					log.Errorf("%v", e)
+					errs.Add(e)
+					return
+				}
+			} else {
+				ns := &corev1.Namespace{}
+				e := clusterClient.Get(
+					ctx, ctrlclient.ObjectKey{
+						Name: namespace,
+					}, ns,
+				)
+				if e != nil {
+					log.Errorf("%v", e)
+					errs.Add(e)
+					return
+				}
+
+				if !constants.IstioInjectedNamespaceSelector.Matches(labels.Set(ns.Labels)) {
+					retCh <- nil
+					return
+				}
+			}
+
 			ret, merr := fetchMicroServices(
 				ctx, clusterClient, istioClient,
 				meshName, clusterName, namespace,
-				serviceName, isMainCluster, nil,
+				serviceName, isMainCluster,
+				labelSelector, fieldSelector,
 			)
 
 			if len(ret) > 0 {
@@ -179,10 +208,34 @@ func (m *meshClusterService) ListMicroServices(
 	return rets, errs
 }
 
+// injectedNamespaceSelector create istio injected namespace field selector
+func (m *meshClusterService) injectedNamespaceSelector(ctx context.Context, clusterName string) (
+	fields.Selector, error) {
+
+	nss, e := m.common.ListNamespaces(ctx, clusterName, constants.IstioInjectedNamespaceSelector)
+	if e != nil {
+		log.Errorf("%v", e)
+		return nil, e
+	}
+
+	if len(nss) == 0 {
+		return nil, nil
+	}
+
+	var fbuf bytes.Buffer
+	for _, ns := range nss {
+		fbuf.WriteString("metadata.namespace=")
+		fbuf.WriteString(ns.Name)
+		fbuf.WriteString(",")
+	}
+	fstr := strings.TrimSuffix(fbuf.String(), ",")
+	return fields.ParseSelector(fstr)
+}
+
 // 2020-11-06 implements micro service list
 func fetchMicroServices(ctx context.Context, clusterClient ctrlclient.Client, istioClient ctrlclient.Client,
 	meshName, clusterName, namespace, serviceName string,
-	isMainCluster bool, sel labels.Selector) ([]rest.MicroService, *errors.MultiError) {
+	isMainCluster bool, lsel labels.Selector, fsel fields.Selector) ([]rest.MicroService, *errors.MultiError) {
 
 	var (
 		wg    = &sync.WaitGroup{}
@@ -207,9 +260,15 @@ func fetchMicroServices(ctx context.Context, clusterClient ctrlclient.Client, is
 		role = "master"
 	}
 
-	if sel != nil {
-		rs, _ := sel.Requirements()
+	if lsel != nil {
+		rs, _ := lsel.Requirements()
 		labelSelector.Add(rs...)
+	}
+
+	if fsel != nil {
+		fieldSelector = fields.AndSelectors(
+			fieldSelector, fsel,
+		)
 	}
 
 	wg.Add(8)
@@ -217,8 +276,9 @@ func fetchMicroServices(ctx context.Context, clusterClient ctrlclient.Client, is
 	go func() {
 		// 1
 		defer wg.Done()
+		fSelector := fieldSelector
 		if serviceName != "" {
-			fieldSelector = fields.AndSelectors(
+			fSelector = fields.AndSelectors(
 				fieldSelector, fields.OneTermEqualSelector("metadata.name", serviceName),
 			)
 		}
@@ -227,7 +287,7 @@ func fetchMicroServices(ctx context.Context, clusterClient ctrlclient.Client, is
 		err = clusterClient.List(ctx, ret, &ctrlclient.ListOptions{
 			LabelSelector: labelSelector,
 			Namespace:     namespace,
-			FieldSelector: fieldSelector,
+			FieldSelector: fSelector,
 		})
 		svcs = ret.Items
 		if err != nil {
