@@ -1993,7 +1993,7 @@ func (t *TKE) installTKEMonitorAPI(ctx context.Context) error {
 		} else if t.Para.Config.Monitor.ThanosMonitor != nil {
 			options["StorageType"] = "thanos"
 			// thanos-query address
-			options["StorageAddresses"] = "http://thanos-query.tke.svc.cluster.local:9090"
+			options["StorageAddress"] = "http://thanos-query.tke.svc.cluster.local:9090"
 		}
 	}
 
@@ -2058,7 +2058,9 @@ func (t *TKE) installTKEMonitorController(ctx context.Context) error {
 			params["StorageType"] = "thanos"
 			params["MonitorStorageType"] = "thanos"
 			// thanos-query address
-			params["MonitorStorageAddresses"] = "http://thanos-query.tke.svc.cluster.local:9090"
+			params["StorageAddress"] = "http://thanos-query.tke.svc.cluster.local:9090"
+			// thanos receive remote-write node-port address
+			params["MonitorStorageAddresses"] = fmt.Sprintf("http://%s:31141", t.servers[0])
 		}
 	}
 
