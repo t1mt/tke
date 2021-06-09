@@ -43,6 +43,7 @@ type Options struct {
 	RegistryNamespace          *string
 	CustomUpgradeResourceDir   *string
 	CustomChartsName           *string
+	DryRun                     *bool
 }
 
 // NewOptions creates a new Options with a default config.
@@ -72,6 +73,7 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	o.RegistryNamespace = fs.String("namespace", "", "specify registry namespace for upgrade")
 	o.CustomUpgradeResourceDir = fs.String("upgrade-resource-dir", constants.DefaultCustomResourceDir, "specify custom upgrade resource dir for prepare custom K8s images")
 	o.CustomChartsName = fs.String("custom-charts-name", constants.DefaultCustomChartsName, "specify custom chart name under your host /opt/tke-installer/data/ path")
+	o.DryRun = fs.Bool("dry-run", false, "dry run")
 }
 
 // ApplyFlags parsing parameters from the command line or configuration file

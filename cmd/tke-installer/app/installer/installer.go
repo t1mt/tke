@@ -94,6 +94,7 @@ import (
 const namespace = "tke"
 
 type TKE struct {
+	DryRun  bool                     `json:"dry_run"`
 	Config  *config.Config           `json:"config"`
 	Para    *types.CreateClusterPara `json:"para"`
 	Cluster *v1.Cluster              `json:"cluster"`
@@ -121,6 +122,7 @@ func New(config *config.Config) *TKE {
 	c := new(TKE)
 
 	c.Config = config
+	c.DryRun = config.DryRun
 	c.Para = new(types.CreateClusterPara)
 	c.Cluster = new(v1.Cluster)
 	c.progress = new(types.ClusterProgress)
@@ -505,10 +507,12 @@ func (t *TKE) run() error {
 		if err := t.loadPara(); err != nil {
 			return err
 		}
-		err := t.prepare()
-		if err != nil {
-			statusErr := err.Status()
-			return errors.New(statusErr.String())
+		if !t.DryRun {
+			err := t.prepare()
+			if err != nil {
+				statusErr := err.Status()
+				return errors.New(statusErr.String())
+			}
 		}
 	}
 
@@ -1024,7 +1028,42 @@ func (t *TKE) do() {
 	ctx := t.log.WithContext(context.Background())
 
 	var taskType string
-	if t.Config.Upgrade {
+	if t.DryRun {
+		taskType = "dryRun"
+		t.Para.Config.SkipSteps = []string{
+			"Init expansion", "Prepare expansion files", "Execute pre install hook",
+			"Load images", "Tag images", "Setup local registry", "Push images",
+
+			"Generate certificates for TKE components",
+			"Create global cluster",
+			"Write kubeconfig",
+			"Execute post cluster ready hook",
+			"Prepare front proxy certificates",
+			"Create namespace for install TKE",
+			"Prepare certificates",
+			"Prepare baremetal provider config",
+			"Install etcd",
+			"Patch platform versions in cluster info",
+
+			"Prepare images before stop local registry",
+			"Stop local registry to give up 80/443 for tke-gateway",
+
+			"Install tke-registry-api",
+			"Install tke-registry-controller",
+
+			"Register tke api into global cluster",
+			"Import resource to TKE platform",
+			"Prepare push images to TKE registry",
+			"Push images to registry",
+			"Set global cluster hosts",
+			"Check need imported chart groups",
+			"Import charts",
+			"Execute post install hook",
+		}
+		ctx = context.WithValue(ctx, "dryRun", true)
+		t.servers = []string{"192.168.0.1"}
+		t.initSteps()
+	} else if t.Config.Upgrade {
 		taskType = "upgrade"
 		t.upgradeSteps()
 	} else {
@@ -1033,7 +1072,7 @@ func (t *TKE) do() {
 		t.initSteps()
 	}
 
-	if !t.Config.Upgrade && t.runAfterClusterReady() {
+	if !t.DryRun && !t.Config.Upgrade && t.runAfterClusterReady() {
 		t.initDataForDeployTKE()
 	}
 
@@ -1062,8 +1101,10 @@ func (t *TKE) do() {
 			t.progress.Hosts = append(t.progress.Hosts, t.Para.Config.Gateway.Domain)
 		}
 
-		cfg, _ := t.getKubeconfig()
-		t.progress.Kubeconfig, _ = runtime.Encode(clientcmdlatest.Codec, cfg)
+		if !t.DryRun {
+			cfg, _ := t.getKubeconfig()
+			t.progress.Kubeconfig, _ = runtime.Encode(clientcmdlatest.Codec, cfg)
+		}
 	}
 
 	if t.Para.Config.Registry.TKERegistry != nil {
@@ -1097,10 +1138,16 @@ func (t *TKE) doSteps(ctx context.Context, taskType string) {
 			t.log.Infof("%d.%s [Success] [%fs]", t.Step, t.steps[t.Step].Name, time.Since(start).Seconds())
 
 			t.Step++
-			t.backup()
+			if !t.DryRun {
+				t.backup()
+			}
 			t.progress.Status = types.StatusDoing
 			return true, nil
 		})
+	}
+
+	if t.DryRun {
+		t.log.Flush()
 	}
 
 	t.log.Infof("===>%s task [Sucesss] [%fs]", taskType, time.Since(start).Seconds())
@@ -1602,6 +1649,9 @@ func (t *TKE) installTKEGateway(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDaemonset(ctx, t.globalClient, t.namespace, "tke-gateway")
 		if err != nil {
@@ -1631,6 +1681,9 @@ func (t *TKE) installTKELogagentAPI(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-logagent-api")
 		if err != nil {
@@ -1654,6 +1707,9 @@ func (t *TKE) installTKELogagentController(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-logagent-controller")
 		if err != nil {
@@ -1695,6 +1751,9 @@ func (t *TKE) installTKEAuthAPI(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-auth-api")
 		if err != nil {
@@ -1716,6 +1775,9 @@ func (t *TKE) installTKEAuthController(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-auth-controller")
 		if err != nil {
@@ -1750,6 +1812,9 @@ func (t *TKE) installTKEAudit(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-audit-api")
 		if err != nil {
@@ -1776,6 +1841,9 @@ func (t *TKE) installTKEPlatformAPI(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-platform-api")
 		if err != nil {
@@ -1831,6 +1899,9 @@ func (t *TKE) installTKEPlatformController(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-platform-controller")
 		if err != nil {
@@ -1861,6 +1932,9 @@ func (t *TKE) installTKEBusinessAPI(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-business-api")
 		if err != nil {
@@ -1882,6 +1956,9 @@ func (t *TKE) installTKEBusinessController(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-business-controller")
 		if err != nil {
@@ -1905,6 +1982,9 @@ func (t *TKE) installInfluxDB(ctx context.Context) error {
 		})
 	if err != nil {
 		return err
+	}
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
 	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckStatefulSet(ctx, t.globalClient, t.namespace, "influxdb")
@@ -1934,6 +2014,9 @@ func (t *TKE) installThanos(ctx context.Context) error {
 	err = apiclient.CreateResourceWithDir(ctx, t.globalClient, "manifests/thanos/*.yaml", params)
 	if err != nil {
 		return err
+	}
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
 	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckStatefulSet(ctx, t.globalClient, t.namespace, "thanos-store")
@@ -2001,6 +2084,9 @@ func (t *TKE) installTKEMonitorAPI(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-monitor-api")
 		if err != nil {
@@ -2068,6 +2154,9 @@ func (t *TKE) installTKEMonitorController(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-monitor-controller")
 		if err != nil {
@@ -2094,6 +2183,9 @@ func (t *TKE) installTKENotifyAPI(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-notify-api")
 		if err != nil {
@@ -2113,6 +2205,9 @@ func (t *TKE) installTKENotifyController(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-notify-controller")
 		if err != nil {
@@ -2152,6 +2247,9 @@ func (t *TKE) installTKERegistryAPI(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-registry-api")
 		if err != nil {
@@ -2184,6 +2282,9 @@ func (t *TKE) installTKERegistryController(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-registry-controller")
 		if err != nil {
@@ -2214,6 +2315,9 @@ func (t *TKE) installTKEApplicationAPI(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-application-api")
 		if err != nil {
@@ -2236,6 +2340,9 @@ func (t *TKE) installTKEApplicationController(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-application-controller")
 		if err != nil {
@@ -2262,6 +2369,9 @@ func (t *TKE) installTKEMeshAPI(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-mesh-api")
 		if err != nil {
@@ -2283,6 +2393,9 @@ func (t *TKE) installTKEMeshController(ctx context.Context) error {
 		return err
 	}
 
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	return wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		ok, err := apiclient.CheckDeployment(ctx, t.globalClient, t.namespace, "tke-mesh-controller")
 		if err != nil {
@@ -2389,6 +2502,9 @@ func (t *TKE) registerAPI(ctx context.Context) error {
 			},
 		}
 
+		if v, _ := ctx.Value("dryRun").(bool); v {
+			return nil
+		}
 		err = wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 			_, err := client.ApiregistrationV1().APIServices().Get(ctx, apiService.Name, metav1.GetOptions{})
 			if err == nil {
@@ -2408,6 +2524,9 @@ func (t *TKE) registerAPI(ctx context.Context) error {
 			return errors.Wrapf(err, "register apiservice %v error", one)
 		}
 
+		if v, _ := ctx.Value("dryRun").(bool); v {
+			return nil
+		}
 		err = wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 			a, err := client.ApiregistrationV1().APIServices().Get(ctx, apiService.Name, metav1.GetOptions{})
 			if err != nil {
@@ -2428,6 +2547,9 @@ func (t *TKE) registerAPI(ctx context.Context) error {
 func (t *TKE) importResource(ctx context.Context) error {
 	var err error
 	// ensure api ready
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		return nil
+	}
 	err = wait.PollImmediate(5*time.Second, 10*time.Minute, func() (bool, error) {
 		_, err = t.platformClient.Clusters().List(ctx, metav1.ListOptions{})
 		if err != nil {

@@ -47,6 +47,7 @@ type Config struct {
 	EnableCustomExpansion bool
 	// CustomExpansionDir path to expansions. default `data/expansions`
 	CustomExpansionDir string
+	DryRun             bool
 }
 
 // CreateConfigFromOptions creates a running configuration instance based
@@ -72,5 +73,6 @@ func CreateConfigFromOptions(serverName string, opts *options.Options) (*Config,
 		RegistryNamespace:          *opts.RegistryNamespace,
 		CustomUpgradeResourceDir:   *opts.CustomUpgradeResourceDir,
 		CustomChartsName:           *opts.CustomChartsName,
+		DryRun:                     *opts.DryRun,
 	}, nil
 }

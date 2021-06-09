@@ -39,6 +39,7 @@ import (
 	clientsetscheme "k8s.io/client-go/kubernetes/scheme"
 	apiregistrationv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	kubeaggregator "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
+	"tkestack.io/tke/pkg/util/log"
 	"tkestack.io/tke/pkg/util/template"
 )
 
@@ -321,6 +322,12 @@ func CreateResourceWiteContent(ctx context.Context, client kubernetes.Interface,
 
 	if err != nil {
 		return err
+	}
+
+	if v, _ := ctx.Value("dryRun").(bool); v {
+		l := log.FromContext(ctx)
+		l.Infof("%s\n", string(data))
+		return nil
 	}
 
 	items := strings.Split(string(data), "\n---")
